@@ -1,67 +1,71 @@
-from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from redis_om import HashModel, NotFoundError
-import httpx  # Modernija zamena za requests
-import asyncio
-from database import redis # Koristi .env iz database.py 
+from redis_om import HashModel, Migrator
+from starlette.requests import Request
+import requests
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from database import redis
 
-app = FastAPI(title="Order Service")
+class AppSettings(BaseSettings):
+    app_redis_host: str = "localhost"
+    app_redis_port: int = 6379
+    app_redis_password: str = ""
+    inventory_url: str = "http://localhost:8000"
+
+    # Automatski će povući INVENTORY_URL iz docker-compose environment-a
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+app_settings = AppSettings()
+
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['http://localhost:3000'],
+    allow_origins=['*'],
     allow_methods=['*'],
     allow_headers=['*']
 )
 
+# KLJUČNA IZMENA: Dodat index=True
 class Order(HashModel, index=True):
     product_id: str
     price: float
     fee: float
     total: float
     quantity: int
-    status: str  # pending, completed, refunded
+    status: str
 
     class Meta:
         database = redis
 
 @app.get('/orders/{pk}')
-async def get_order(pk: str):
-    try:
-        return Order.get(pk)
-    except NotFoundError:
-        raise HTTPException(status_code=404, detail="Order not found")
+def get(pk: str):
+    return Order.get(pk)
 
 @app.post('/orders')
-async def create_order(body: dict, background_tasks: BackgroundTasks):
-    # Asinhroni poziv ka Inventory servisu
-    async with httpx.AsyncClient() as client:
-        response = await client.get(f'http://localhost:8000/products/{body["id"]}')
-        if response.status_code != 200:
-            raise HTTPException(status_code=400, detail="Product not found in Inventory")
-        product = response.json()
+async def create(request: Request):
+    body = await request.json()
+
+    # Koristimo URL iz podešavanja (u Dockeru će biti http://inventory-api:8000)
+    req = requests.get(f'{app_settings.inventory_url}/products/{body["id"]}')
+    req.raise_for_status() # Dobra praksa: izbaci grešku ako Inventory ne odgovori
+    product = req.json()
 
     order = Order(
         product_id=body['id'],
         price=product['price'],
         fee=0.2 * product['price'],
-        total=1.2 * product['price'] * body['quantity'],
+        total=1.2 * product['price'],
         quantity=body['quantity'],
         status='pending'
     )
-    order.save()
-
-    # Pokretanje pozadinskog zadatka
-    background_tasks.add_task(process_order, order)
-
-    return order
-
-async def process_order(order: Order):
-    # Simulacija obrade plaćanja (5 sekundi)
-    await asyncio.sleep(5) 
-    order.status = 'completed'
+    
     order.save()
     
-    # Slanje događaja u Redis Stream za Inventory servis
-    # Koristimo model_dump() jer je dict() zastareo u Pydantic V2
-    redis.xadd('order_completed', order.model_dump(), '*')
+    # Slanje događaja u Redis Stream
+    redis.xadd('order_completed', order.dict(), '*')
+    
+    return order
+
+# Neophodno da bi Redis-OM napravio indekse u bazi čim se aplikacija pokrene
+Migrator().run()
