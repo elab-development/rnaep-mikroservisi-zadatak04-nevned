@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+
+  inventory-api:
+    build: ./inventory
+    container_name: inventory-api
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+
+  inventory-consumer:
+    build: ./inventory
+    container_name: inventory-consumer
+    command: python consumer.py
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+
+  payment-api:
+    build: ./payment
+    container_name: payment-api
+    ports:
+      - "8001:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - INVENTORY_URL=http://inventory-api:8000
+    depends_on:
+      - redis
+
+  payment-consumer:
+    build: ./payment
+    container_name: payment-consumer
+    command: python consumer.py
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+
+  notification-service:
+    build: ./notification
+    container_name: notification-service
+    command: python consumer.py
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
